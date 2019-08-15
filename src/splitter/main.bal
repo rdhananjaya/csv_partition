@@ -8,6 +8,7 @@ function getHeaders(io:ReadableCSVChannel chan) returns string[]|error {
     if (chan.hasNext()) {
         var titles = check chan.getNext();
         if (titles is string[]) {
+            io:println("Headers:");
             io:println(titles);
             columnHeaders = titles;
         }
@@ -38,21 +39,21 @@ function foo(string filePath) returns error? {
     CsvTab tab = getCsvContent(rCsvChannel);
     checkpanic rCsvChannel.close();
 
-    (function (string) returns boolean) spliter = p => p.trim() == "1";
+    (function (string) returns boolean) spliter = p => p.trim() == "2";
 
-    string[][][]|error splited = partition(tab, columnHeaders, "b", spliter);
-    if (splited is string[][][]) {
+    CsvTab[]|error splited = partition(tab, columnHeaders, "b", spliter, 3);
+    if (splited is CsvTab[]) {
+        io:println("Partition for true eval: [size]" + splited[0].length().toString());
         io:println(splited[0]);
         io:println();
+        io:println("Partition for false eval:[size]" + splited[0].length().toString());
         io:println(splited[1]);
-        io:println(splited[0].length());
-        io:println(splited[1].length());
     }
 }
 
-function partition(string[][] tab, 
+function partition(CsvTab tab, 
                     string[] headers, string headerName, 
-                    (function (string) returns boolean) spliter) returns string[][][]|error {
+                    (function (string) returns boolean) spliter, int parallelism) returns CsvTab[]|error {
     int? columnPos = headers.map(s => s.toLowerAscii()).indexOf(headerName);
     io:println("Column number: " + columnPos.toString());
     if (columnPos is ()) {
@@ -60,23 +61,51 @@ function partition(string[][] tab,
     }
 
     int length = tab.length();
-    int midPoint = length/2;
-    // io:println("length:" + length.toString());
-    // io:println("mid:" + midPoint.toString());
+    int subSectionLen = length/parallelism;
 
     function(string[]) returns boolean cellFilter = function(string[] row) returns boolean {
         return spliter(row[<int>columnPos]);
     };
 
-    future<string[][][]> f1 = start partitionInternal(tab, cellFilter, 0, midPoint);
-    future<string[][][]> f2 = start partitionInternal(tab, cellFilter, midPoint, length);
+    future<CsvTab[]>[] futures = [];
+    int startPos = 0;
+    int endPos = subSectionLen;
+    // start partition parallely.
+    while (true) {
+        future<CsvTab[]> f = start partitionInternal(tab, cellFilter, startPos, endPos);
+        futures.push(f);
+        startPos += subSectionLen;
+        endPos += subSectionLen;
+        if (endPos + 1 == length) {
+            endPos = length;
+        }
+        if (endPos > length) {
+            break;
+        }
+    }
 
-    string[][][] f1_ = wait f1;
-    string[][][] f2_ = wait f2;
+    // merge sub-partitions into single array.
+    CsvTab[][] subTabs = futures.map(f => wait f);
+    CsvTab t1 = [];
+    CsvTab t2 = [];
+    CsvTab[] merged = [t1, t2];
 
-    f1_[0].push(...f2_[0]);
-    f1_[1].push(...f2_[1]);
-    return f1_;
+    worker w1 {
+        foreach int i in 0...(subTabs.length() - 1) {
+            merged[0].push(...subTabs[i][0]);
+        }
+    }
+
+    worker w2 {
+        foreach int i in 0...(subTabs.length() - 1) {
+            merged[1].push(...subTabs[i][1]);
+        }
+    }
+
+    wait w1;
+    wait w2;
+
+    return merged;
 }
 
 function partitionInternal(string[][] tab, 
